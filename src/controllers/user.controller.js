@@ -1,7 +1,7 @@
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { User } from "../models/user.model.js";
-import { uploadOnCloudinary } from "../utils/cloudinary.js";
+import { deleteFromCloudinary, uploadOnCloudinary } from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import jwt from "jsonwebtoken"
 
@@ -244,7 +244,7 @@ const changeCurrentPassword = asyncHandler(async( req, res ) => {
 const getCurrentUser = asyncHandler(async( req, res) => {
   return res
   .status(200)
-  .json(200, req.user, "current user fetched succesfully")
+  .json(new ApiResponse(200, req.user, "current user fetched succesfully"))
 
 })
 
@@ -275,10 +275,18 @@ const updateUserAvatar = asyncHandler(async (req, res) =>  {
 
   const avatarLocalPath = req.file?.path
 
-
+//add remove old avatar url logic
   if (!avatarLocalPath) {
     throw new ApiError(400, "Avatar file is missing!!")
   }
+
+  const userToUpdate = await User.findById(req.user?._id);
+
+  if (!userToUpdate) {
+    throw new ApiError(404, "User not found for avatar update!!")
+  }
+
+  const oldAvatarUrl = userToUpdate.avatar//Store the old avatar url
 
   const avatar = await uploadOnCloudinary(avatarLocalPath)
 
@@ -293,6 +301,16 @@ const updateUserAvatar = asyncHandler(async (req, res) =>  {
     },
     {new: true}
   ).select("-password")
+
+   if (oldAvatarUrl && oldAvatarUrl.startsWith('http') && oldAvatarUrl.includes('cloudinary.com')) {
+    deleteFromCloudinary(oldAvatarUrl).catch(error => {
+      console.error("Failed to delete old avatar from Cloudinary after update:", error);
+     
+     
+    });
+  } else if (oldAvatarUrl) {
+      console.log(`Old avatar URL "${oldAvatarUrl}" was not a valid Cloudinary URL or empty. Skipping deletion.`);
+  }
 
   return res
   .status(200)
@@ -327,6 +345,75 @@ const updateUserCoverImage = asyncHandler(async (req, res) =>  {
   .json(ApiResponse(200), user, "Cover Image updated successfully")
 })
 
+const getUserChannelProfile = asyncHandler(async(req, res) => {
+   const {userName} =  req.params
+
+   if (!userName?.trim()) {
+       throw new ApiError(400, "username is missing")
+   }
+
+   const channel = await User.aggregate([
+     {
+      $match: {
+        userName: userName?.toLowerCase()
+      }
+     },
+     { 
+      $lookup: {
+        from: "subscriptions",
+        localField: "_id",
+        foreignField: "channel",
+        as: "subscribers"
+      }
+    },
+    {
+      $lookup: {
+        from: "subscriptions",
+        localField: "_id",
+        foreignField: "subscriber",
+        as: "subscribedTo"
+      }
+    }, 
+    {
+      $addFields: {
+        subscribersCount: {
+          $size: "$subscribers"
+        },
+        channelsSubscribedToCount: {
+          $size: "$subscribedTo"
+        },
+        isSubscribed: {
+          $cond: {
+            if: {$in: [req.user?._id , "$subscribers.subscriber"]},
+            then: true,
+            else: false 
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        fullName: 1,
+        userName: 1,
+        subscribersCount: 1,
+        channelsSubscribedToCount: 1,
+        isSubscribed: 1,
+        avatar: 1,
+        coverImage: 1,
+        email: 1 
+
+      }
+    }
+   ])
+   if (!channel?.length) {
+    throw new ApiError(404, "channel does not exist")
+   }
+
+   return res
+   .status(200)
+   .json(new ApiResponse(200, channel[0], "User channel fetched successfully"))
+})
+
 export {
     registerUser,
     loginUser,
@@ -336,5 +423,6 @@ export {
     getCurrentUser,
     updateAccountDetails,
     updateUserAvatar,
-    updateUserCoverImage
+    updateUserCoverImage,
+    getUserChannelProfile
 }
